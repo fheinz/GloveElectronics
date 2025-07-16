@@ -320,10 +320,10 @@ void StartBLEClient() {
   client = BLEDevice::createClient();
 }
 
-bool BLEConnectToServer() {
+void BLEClientLoop() {
   static ClientCallbacks *client_callbacks = nullptr; 
 
-  if (connected_to_server) return true;
+  if (connected_to_server) return;
 
   if (!client_callbacks) client_callbacks = new ClientCallbacks();
 
@@ -360,11 +360,6 @@ bool BLEConnectToServer() {
     }
   }
   scan->clearResults();
-  return connected_to_server;
-}
-
-void BLEClientLoop() {
-  if (!(connected_to_server || BLEConnectToServer())) return;
 }
 
 
