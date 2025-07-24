@@ -170,8 +170,13 @@ void InitDriver(uint8_t channel) {
 }
 
 void RunMotors(int pattern, bool is_client) {
-  if (pattern < 0) return;
-  TickType_t last_wake_time = xTaskGetTickCount();
+  Serial.printf("%010u Running sequence %02d\n", xTaskGetTickCount(), pattern);
+
+  if (pattern < 0) {
+    vTaskDelay(664);
+    return;
+  }
+
   uint32_t start_time = millis();
 
   uint8_t seq = vibration_patterns[pattern];
@@ -180,12 +185,11 @@ void RunMotors(int pattern, bool is_client) {
     digitalWrite(SYNC_PIN, HIGH);
   }
 
-  Serial.printf("%010u Running sequence %02x\n", millis(), seq);
   for (int ch = 0; ch < NUM_CHANNELS; ++ch, seq >>= 2) {
     int finger = seq & 0x03;
     ledcWrite(PWM_PINS[finger], ACTIVE_DUTY_CYCLE);
     digitalWrite(LED_PIN, HIGH);
-    vTaskDelayUntil(&last_wake_time, 100 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(100));
     ledcWrite(PWM_PINS[finger], 128);
     digitalWrite(LED_PIN, LOW);
     // Doing the skew computation here assumes that the skew is < 100ms, which should be safe
@@ -193,12 +197,12 @@ void RunMotors(int pattern, bool is_client) {
       if (is_client) {
         digitalWrite(SYNC_PIN, LOW);
       } else if (sync_time != 0) {
-        uint32_t now = millis();
-        Serial.printf("%010u Skew %dms\n", now, start_time - sync_time);
+        Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - sync_time);
       }
     }
-    vTaskDelayUntil(&last_wake_time, 66 / portTICK_PERIOD_MS);
+    vTaskDelay(pdMS_TO_TICKS(66));
   }
+  Serial.printf("%010u Done sequence %02d\n", xTaskGetTickCount(), pattern);
 }
 
 //**********************************************************************************
@@ -271,7 +275,6 @@ void BLEServerLoop() {
 
 // For BLE client.
 volatile bool connected_to_server = false;
-volatile int32_t tick_drift;
 BLEScan* scan = nullptr;
 BLEClient* client = nullptr;
 
@@ -288,6 +291,7 @@ class ClientCallbacks : public BLEClientCallbacks {
 
 static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool is_notify) {
   static TickType_t last_cycle_start_received = 0;
+  TickType_t client_ticks = xTaskGetTickCount();
   uint32_t value[3];
 
   if (len != sizeof(value)) {
@@ -300,15 +304,19 @@ static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, siz
   TickType_t next_cycle_start = value[1];
   current_pattern = value[2];
 
-  TickType_t client_ticks = xTaskGetTickCount();
-  tick_drift = client_ticks - server_ticks;
-  next_motor_cycle_start = next_cycle_start + tick_drift;
   if (last_cycle_start_received != next_cycle_start) {
-    Serial.printf(
-      "%010u: New pattern starting at %010u(%u) %d(%02x/%02x)\n",
-      client_ticks, next_motor_cycle_start, tick_drift, current_pattern,
-      vibration_patterns[current_pattern], (uint8_t)~vibration_patterns[current_pattern]);
+    int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
+
+    // HORRIBLE HACK: experiments show that the actual drift is generally at 15±10 ms.
+    // Biasing the clock drift by -15ms we should minimize the actual drift.
+    // Maybe switching to ESP-NOW can help us make this less awkward.
+    tick_drift -= 15; 
+
     last_cycle_start_received = next_cycle_start;
+    next_motor_cycle_start = next_cycle_start + tick_drift;
+    Serial.printf(
+      "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
+      client_ticks, server_ticks, next_cycle_start, current_pattern, next_motor_cycle_start, tick_drift, current_pattern);
   }
 }
 
@@ -372,7 +380,7 @@ void BLEClientLoop() {
 //**********************************************************************************
 // Setup & Loop
 
-const TickType_t ble_update_frequency = 100 / portTICK_PERIOD_MS;
+const TickType_t ble_update_frequency = pdMS_TO_TICKS(100);
 
 void ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
@@ -385,15 +393,17 @@ void ble_server_task(void* parameter) {
 }
 
 void ble_client_task(void* parameter) {
+  TickType_t last_wake_time = xTaskGetTickCount();
+
   StartBLEClient();
   while (true) {
     BLEClientLoop();
-    vTaskDelay(ble_update_frequency / 2);
+    vTaskDelayUntil(&last_wake_time, ble_update_frequency / 2);
   }
 }
 
 // Rounds of five 1-second cycles, of which the first three are active, and the last two are passive
-constexpr TickType_t pattern_frequency = 1000 / portTICK_PERIOD_MS;
+constexpr TickType_t pattern_frequency = pdMS_TO_TICKS(1000);
 constexpr unsigned int cycles_per_round = 5;
 constexpr unsigned int active_cycles_per_round = 3;
 
@@ -421,17 +431,16 @@ void motor_client_task(void* parameter) {
   pinMode(SYNC_PIN, OUTPUT);
   digitalWrite(SYNC_PIN, LOW);
 
-  while (next_motor_cycle_start <= xTaskGetTickCount()) vTaskDelay(10 / portTICK_PERIOD_MS);
+  TickType_t last_wake_time = xTaskGetTickCount();
 
+  while (next_motor_cycle_start <= xTaskGetTickCount()) {
+    vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(10));
+  }
+
+  vTaskDelayUntil(&last_wake_time, next_motor_cycle_start - last_wake_time);
   while (true) {
-    int gap = next_motor_cycle_start - xTaskGetTickCount();
-    TickType_t cycle_end = next_motor_cycle_start + pattern_frequency;
-
-    if (gap > 0) vTaskDelay(gap);
-    int pattern = current_pattern;
-    RunMotors(pattern, true);
-    gap = cycle_end - xTaskGetTickCount();
-    if (gap > 0) vTaskDelay(gap);
+    RunMotors(current_pattern, true);
+    vTaskDelayUntil(&last_wake_time, pattern_frequency);
   }
 }
 
