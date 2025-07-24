@@ -173,7 +173,7 @@ void RunMotors(int pattern, bool is_client) {
   Serial.printf("%010u Running sequence %02d\n", xTaskGetTickCount(), pattern);
 
   if (pattern < 0) {
-    vTaskDelay(664);
+    vTaskDelay(pdMS_TO_TICKS(664));
     return;
   }
 
