@@ -140,11 +140,15 @@ constexpr uint8_t vibration_patterns[] = {
   VIBRATION_PATTERN(3, 2, 0, 1),
   VIBRATION_PATTERN(3, 2, 1, 0),
 };
+constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns) / sizeof(vibration_patterns[0]);
 
 //**********************************************************************************
 // Motor control
 
 constexpr int TARGET_DRIVE_FREQUENCY = 250;  // 250 Hz according to Pfeifer et al. 2021
+constexpr int PULSE_DURATION = pdMS_TO_TICKS(100);
+constexpr int PAUSE_DURATION = pdMS_TO_TICKS(66);
+constexpr int ACTIVE_CYCLE_DURATION = 4 * (PULSE_DURATION + PAUSE_DURATION);
 
 // The chip expects a PWM signal where duty cycle 50 means stopped, and 255 is full speed in one phase, 0 full speed in the opposite phase.
 // Though for signal reasons we can't actually use 0% and 100%.
@@ -169,8 +173,13 @@ void InitDriver(uint8_t channel) {
 }
 
 void RunMotors(int pattern, bool is_client) {
-  if (pattern < 0) return;
-  TickType_t last_wake_time = xTaskGetTickCount();
+  Serial.printf("%010u Running sequence %02d\n", xTaskGetTickCount(), pattern);
+
+  if (pattern < 0) {
+    vTaskDelay(pdMS_TO_TICKS(ACTIVE_CYCLE_DURATION));
+    return;
+  }
+
   uint32_t start_time = millis();
 
   uint8_t seq = vibration_patterns[pattern];
@@ -179,25 +188,24 @@ void RunMotors(int pattern, bool is_client) {
     digitalWrite(SYNC_PIN, HIGH);
   }
 
-  Serial.printf("%010u Running sequence %02x\n", millis(), seq);
   for (int ch = 0; ch < NUM_CHANNELS; ++ch, seq >>= 2) {
     int finger = seq & 0x03;
     ledcWrite(PWM_PINS[finger], ACTIVE_DUTY_CYCLE);
     digitalWrite(LED_PIN, HIGH);
-    vTaskDelayUntil(&last_wake_time, 100 / portTICK_PERIOD_MS);
+    vTaskDelay(PULSE_DURATION);
     ledcWrite(PWM_PINS[finger], 128);
     digitalWrite(LED_PIN, LOW);
     // Doing the skew computation here assumes that the skew is < 100ms, which should be safe
     if (ch == 0) {
       if (is_client) {
-      	digitalWrite(SYNC_PIN, LOW);
+        digitalWrite(SYNC_PIN, LOW);
       } else if (sync_time != 0) {
-        uint32_t now = millis();
-        Serial.printf("%010u Skew %dms\n", now, start_time-sync_time);
+        Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - sync_time);
       }
     }
-    vTaskDelayUntil(&last_wake_time, 66 / portTICK_PERIOD_MS);
+    vTaskDelay(PAUSE_DURATION);
   }
+  Serial.printf("%010u Done sequence %02d\n", xTaskGetTickCount(), pattern);
 }
 
 //**********************************************************************************
@@ -211,6 +219,12 @@ constexpr char* SERVICE_UUID = "21014a2d-ebee-4fcb-b8d4-dcf34c19610a";
 constexpr char* CHARACTERISTIC_UUID = "44f21c6b-b08b-4695-970f-f21a15b538db";
 
 constexpr int BLE_SCAN_TIME_S = 5;
+
+typedef struct {
+  TickType_t sender_timestamp;
+  TickType_t next_cycle_start;
+  int pattern;
+} SyncMessage;
 
 // For BLE server.
 BLEServer* server = nullptr;
@@ -232,6 +246,11 @@ class ServerCallbacks : public BLEServerCallbacks {
   }
 };
 
+void SetSyncMessage(TickType_t next_cycle, int pattern) {
+  SyncMessage message = { xTaskGetTickCount(), next_cycle, pattern };
+  characteristic->setValue((uint8_t*)&message, sizeof(message));
+}
+
 void StartBLEServer() {
   BLEDevice::init("Vibrating Glove (Server)");
   server = BLEDevice::createServer();
@@ -239,8 +258,7 @@ void StartBLEServer() {
   service = server->createService(SERVICE_UUID);
   characteristic = service->createCharacteristic(
     CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  uint32_t data[] = {xTaskGetTickCount(), next_motor_cycle_start, current_pattern};
-  characteristic->setValue((uint8_t *)data, sizeof(data));
+  SetSyncMessage(next_motor_cycle_start, current_pattern);
   service->start();
 
   advertising = BLEDevice::getAdvertising();
@@ -261,8 +279,7 @@ void BLEServerLoop() {
     advertising->start();
   }
   if (device_connected) {
-    uint32_t data[] = {xTaskGetTickCount(), next_motor_cycle_start, current_pattern};
-    characteristic->setValue((uint8_t *)data, sizeof(data));
+    SetSyncMessage(next_motor_cycle_start, current_pattern);
     characteristic->notify();
   }
   last_device_connected = device_connected;
@@ -270,7 +287,6 @@ void BLEServerLoop() {
 
 // For BLE client.
 volatile bool connected_to_server = false;
-volatile int32_t tick_drift;
 BLEScan* scan = nullptr;
 BLEClient* client = nullptr;
 
@@ -287,27 +303,32 @@ class ClientCallbacks : public BLEClientCallbacks {
 
 static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool is_notify) {
   static TickType_t last_cycle_start_received = 0;
-  uint32_t value[3];
+  TickType_t client_ticks = xTaskGetTickCount();
+  SyncMessage message;
 
-  if (len != sizeof(value)) {
-    Serial.printf("Wrong data length: %u, expected %d", len, sizeof(value));
+  if (len != sizeof(message)) {
+    Serial.printf("Wrong data length: %u, expected %d", len, sizeof(message));
     return;
   }
 
-  memcpy(&value, data, len);
-  TickType_t server_ticks = value[0];
-  TickType_t next_cycle_start = value[1];
-  current_pattern = value[2];
+  memcpy(&message, data, len);
+  TickType_t server_ticks = message.sender_timestamp;
+  TickType_t next_cycle_start = message.next_cycle_start;
+  current_pattern = message.pattern;
 
-  TickType_t client_ticks = xTaskGetTickCount();
-  tick_drift = client_ticks - server_ticks;
-  next_motor_cycle_start = next_cycle_start + tick_drift;
   if (last_cycle_start_received != next_cycle_start) {
-    Serial.printf(
-      "%010u: New pattern starting at %010u(%u) %d(%02x/%02x)\n",
-      client_ticks, next_motor_cycle_start, tick_drift, current_pattern,
-      vibration_patterns[current_pattern], (uint8_t)~vibration_patterns[current_pattern]);
+    int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
+
+    // HORRIBLE HACK: experiments show that the actual drift is generally at 15±10 ms.
+    // Biasing the clock drift by -15ms we should minimize the actual drift.
+    // Maybe switching to ESP-NOW can help us make this less awkward.
+    tick_drift -= 15; 
+
     last_cycle_start_received = next_cycle_start;
+    next_motor_cycle_start = next_cycle_start + tick_drift;
+    Serial.printf(
+      "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
+      client_ticks, server_ticks, next_cycle_start, current_pattern, next_motor_cycle_start, tick_drift, current_pattern);
   }
 }
 
@@ -321,7 +342,7 @@ void StartBLEClient() {
 }
 
 bool BLEConnectToServer() {
-  static ClientCallbacks *client_callbacks = nullptr; 
+  static ClientCallbacks* client_callbacks = nullptr;
 
   if (connected_to_server) return true;
 
@@ -371,9 +392,9 @@ void BLEClientLoop() {
 //**********************************************************************************
 // Setup & Loop
 
-const TickType_t ble_update_frequency = 100 / portTICK_PERIOD_MS;
+const TickType_t ble_update_frequency = pdMS_TO_TICKS(100);
 
-void ble_server_task(void *parameter) {
+void ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
   StartBLEServer();
@@ -383,45 +404,55 @@ void ble_server_task(void *parameter) {
   }
 }
 
-void ble_client_task(void *parameter) {
+void ble_client_task(void* parameter) {
+  TickType_t last_wake_time = xTaskGetTickCount();
+
   StartBLEClient();
   while (true) {
     BLEClientLoop();
-    vTaskDelay(ble_update_frequency/2);
+    vTaskDelayUntil(&last_wake_time, ble_update_frequency / 2);
   }
 }
 
-const TickType_t pattern_frequency = 1000 / portTICK_PERIOD_MS;
+// Rounds of five 1-second cycles, of which the first three are active, and the last two are passive
+constexpr TickType_t FULL_CYCLE_LENGTH = pdMS_TO_TICKS(1000);
+constexpr unsigned int CYCLES_PER_ROUND = 5;
+constexpr unsigned int ACTIVE_CYCLES_PER_ROUND = 3;
 
-void motor_server_task(void *parameter) {
+void motor_server_task(void* parameter) {
   pinMode(SYNC_PIN, INPUT);
   attachInterrupt(SYNC_PIN, sync_isr, RISING);
+  int cycle_number = 0;
 
   TickType_t last_wake_time = xTaskGetTickCount();
 
   while (true) {
-    int pattern = current_pattern = random(sizeof(vibration_patterns) / sizeof(vibration_patterns[0]));
-    next_motor_cycle_start = last_wake_time + pattern_frequency;
-    vTaskDelayUntil(&last_wake_time, pattern_frequency);
-    RunMotors(pattern, false);
+    // Select a pattern. 
+    current_pattern = (cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(NUM_VIBRATION_PATTERNS) : -1;
+    // Wait for the start of the new cycle. The BLE cycle runs on a higher frequency, so this wait should give it
+    // plenty of oportunity to communicate the new pattern to the client in time for it to execute it in sync.
+    next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
+    vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
+    // Execute the pattern, the client ought to have gotten the memo by this time and, depending on the accuracy of
+    // our sync, be executing it around now too.
+    RunMotors(current_pattern, false);
   }
 }
 
-void motor_client_task(void *parameter) {
+void motor_client_task(void* parameter) {
   pinMode(SYNC_PIN, OUTPUT);
   digitalWrite(SYNC_PIN, LOW);
 
-  while (next_motor_cycle_start <= xTaskGetTickCount() ) vTaskDelay(10 / portTICK_PERIOD_MS);
+  TickType_t last_wake_time = xTaskGetTickCount();
 
+  while (next_motor_cycle_start <= xTaskGetTickCount()) {
+    vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(10));
+  }
+
+  vTaskDelayUntil(&last_wake_time, next_motor_cycle_start - last_wake_time);
   while (true) {
-    int gap = next_motor_cycle_start - xTaskGetTickCount();
-    TickType_t cycle_end = next_motor_cycle_start + pattern_frequency;
-
-    if (gap > 0) vTaskDelay(gap);
-    int pattern = current_pattern;
-    RunMotors(pattern, true);
-    gap = cycle_end - xTaskGetTickCount();
-    if (gap > 0) vTaskDelay(gap);
+    RunMotors(current_pattern, true);
+    vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
   }
 }
 
