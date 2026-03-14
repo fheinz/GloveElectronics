@@ -112,33 +112,14 @@ bool BatteryOK() {
 //**********************************************************************************
 // Sequence control
 #define VIBRATION_PATTERN(a, b, c, d) ((uint8_t)(((a)&0x03) | (((b)&0x03) << 2) | (((c)&0x03) << 4) | (((d)&0x03) << 6)))
+#define VIBRATION_PATTERNS(a, b, c, d) VIBRATION_PATTERNS3(a, b, c, d), VIBRATION_PATTERNS3(b, a, c, d), VIBRATION_PATTERNS3(c, a, b, d), VIBRATION_PATTERNS3(d, a, b, c)
+#define VIBRATION_PATTERNS3(a, b, c, d) VIBRATION_PATTERNS2(a, b, c, d), VIBRATION_PATTERNS2(a, c, b, d), VIBRATION_PATTERNS2(a, d, b, c)
+#define VIBRATION_PATTERNS2(a, b, c, d) VIBRATION_PATTERNS(a, b, c, d), VIBRATION_PATTERNS(a, b, d, c)
+
 
 // All possible sequences
 constexpr uint8_t vibration_patterns[] = {
-  VIBRATION_PATTERN(0, 1, 2, 3),
-  VIBRATION_PATTERN(0, 1, 3, 2),
-  VIBRATION_PATTERN(0, 2, 1, 3),
-  VIBRATION_PATTERN(0, 2, 3, 1),
-  VIBRATION_PATTERN(0, 3, 1, 2),
-  VIBRATION_PATTERN(0, 3, 2, 1),
-  VIBRATION_PATTERN(1, 0, 2, 3),
-  VIBRATION_PATTERN(1, 0, 3, 2),
-  VIBRATION_PATTERN(1, 2, 0, 3),
-  VIBRATION_PATTERN(1, 2, 3, 0),
-  VIBRATION_PATTERN(1, 3, 0, 2),
-  VIBRATION_PATTERN(1, 3, 2, 0),
-  VIBRATION_PATTERN(2, 0, 1, 3),
-  VIBRATION_PATTERN(2, 0, 3, 1),
-  VIBRATION_PATTERN(2, 1, 0, 3),
-  VIBRATION_PATTERN(2, 1, 3, 0),
-  VIBRATION_PATTERN(2, 3, 0, 1),
-  VIBRATION_PATTERN(2, 3, 1, 0),
-  VIBRATION_PATTERN(3, 0, 1, 2),
-  VIBRATION_PATTERN(3, 0, 2, 1),
-  VIBRATION_PATTERN(3, 1, 0, 2),
-  VIBRATION_PATTERN(3, 1, 2, 0),
-  VIBRATION_PATTERN(3, 2, 0, 1),
-  VIBRATION_PATTERN(3, 2, 1, 0),
+  VIBRATION_PATTERNS(0, 1, 2, 3)
 };
 constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns) / sizeof(vibration_patterns[0]);
 
