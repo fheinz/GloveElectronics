@@ -34,6 +34,7 @@ constexpr uint32_t I2C_CLOCK_FREQUENCY = 400000;
 constexpr uint16_t DRV2605_I2C_ADDR = 0x5A;
 
 constexpr uint8_t DRV2605_REG_MODE = 0x01;
+constexpr uint8_t DRV2605_MODE_PWM = 0x03;
 constexpr uint8_t DRV2605_REG_FEEDBACK = 0x1A;
 constexpr uint8_t DRV2605_REG_CONTROL3 = 0x1D;
 constexpr uint8_t DRV2605_REG_VBATT = 0x21;
@@ -41,51 +42,90 @@ constexpr uint8_t DRV2605_REG_VBATT = 0x21;
 constexpr uint8_t DRV2605_LRA_MODE = 0x80;
 constexpr uint8_t DRV2605_LRA_OPEN_LOOP = 0x01;
 
+class DRV2605 {
+ public:
+  DRV2605(uint8_t channel) : channel_(channel) {}
+
+  void init() {
+    // This init sequence is adapted from the Adafruit DRV2605 library.
+    // Puts the driver out of standby and into PWM input mode.
+    setMode(DRV2605_MODE_PWM);
+    setFeedback(getFeedback() | DRV2605_LRA_MODE);
+    setControl3(getControl3() | DRV2605_LRA_OPEN_LOOP);
+  }
+
+  float getVBatt() {
+    _selectChannel();
+    return static_cast<float>(_readRegister(DRV2605_REG_VBATT)) * 5.6f / 255.0f;
+  }
+  
+  void setMode(uint8_t mode) {
+      _selectChannel();
+      _writeRegister(DRV2605_REG_MODE, mode);
+  }
+
+  uint8_t getMode() {
+      _selectChannel();
+      return _readRegister(DRV2605_REG_MODE);
+  }
+  
+  void setFeedback(uint8_t value) {
+      _selectChannel();
+      _writeRegister(DRV2605_REG_FEEDBACK, value);
+  }
+
+  uint8_t getFeedback() {
+      _selectChannel();
+      return _readRegister(DRV2605_REG_FEEDBACK);
+  }
+
+  void setControl3(uint8_t value) {
+      _selectChannel();
+      _writeRegister(DRV2605_REG_CONTROL3, value);
+  }
+  
+  uint8_t getControl3() {
+      _selectChannel();
+      return _readRegister(DRV2605_REG_CONTROL3);
+  }
+
+ private:
+  void _selectChannel() {
+    Wire.beginTransmission(I2C_MUX_ADDR);
+    Wire.write(1 << channel_);
+    Wire.endTransmission();
+  }
+
+  void _writeRegister(uint8_t reg_addr, uint8_t val) {
+    uint8_t buf[2] = { reg_addr, val };
+    Wire.beginTransmission(DRV2605_I2C_ADDR);
+    Wire.write(buf, 2);
+    Wire.endTransmission();
+  }
+
+  uint8_t _readRegister(uint8_t reg_addr) {
+    uint8_t buf[1] = { reg_addr };
+    Wire.beginTransmission(DRV2605_I2C_ADDR);
+    Wire.write(buf, 1);
+    Wire.endTransmission(/*stop=*/false);
+    Wire.requestFrom(DRV2605_I2C_ADDR, 1);
+    buf[0] = Wire.read();
+    Wire.endTransmission();
+    return buf[0];
+  }
+
+  const uint8_t channel_;
+};
+
 void I2CBegin() {
+  digitalWrite(DRV_EN_PIN, HIGH);
   Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK_FREQUENCY);
-}
-
-void SetI2CChannel(uint8_t channel) {
-  Wire.beginTransmission(I2C_MUX_ADDR);
-  Wire.write(1 << channel);
-  Wire.endTransmission();
-}
-
-void WriteDriverRegister(uint8_t reg_addr, uint8_t val) {
-  uint8_t buf[2] = { reg_addr, val };
-  Wire.beginTransmission(DRV2605_I2C_ADDR);
-  Wire.write(buf, 2);
-  Wire.endTransmission();
-}
-
-uint8_t ReadDriverRegister(uint8_t reg_addr) {
-  uint8_t buf[1] = { reg_addr };
-  Wire.beginTransmission(DRV2605_I2C_ADDR);
-  Wire.write(buf, 1);
-  Wire.endTransmission(/*stop=*/false);
-  Wire.requestFrom(DRV2605_I2C_ADDR, 1);
-  buf[0] = Wire.read();
-  Wire.endTransmission();
-  return buf[0];
+  // Wait for the driver to be ready (datasheet page 53).
+  delayMicroseconds(250);
 }
 
 //**********************************************************************************
 // Motor control
-
-void InitDriver(uint8_t channel) {
-  digitalWrite(DRV_EN_PIN, HIGH);
-
-  SetI2CChannel(channel);
-
-  // Wait 250 microseconds for the driver to be ready (datasheet page 53).
-  delayMicroseconds(250);
-
-  // This init sequence is adapted from the Adafruit DRV2605 library.
-  WriteDriverRegister(DRV2605_REG_MODE, 0x03);  // out of standby and into PWM input mode.
-
-  WriteDriverRegister(DRV2605_REG_FEEDBACK, ReadDriverRegister(DRV2605_REG_FEEDBACK) | DRV2605_LRA_MODE);
-  WriteDriverRegister(DRV2605_REG_CONTROL3, ReadDriverRegister(DRV2605_REG_CONTROL3) | DRV2605_LRA_OPEN_LOOP);
-}
 
 // The chip expects a PWM signal where duty cycle 50 means stopped, and 255 is full speed in one phase, 0 full speed in the opposite phase.
 // Though for signal reasons we can't actually use 0% and 100%.
@@ -96,21 +136,23 @@ constexpr int TARGET_DRIVE_FREQUENCY = 250;  // 250 Hz according to Pfeifer et a
 
 class Motor {
  public:
-  Motor(int pwm_pin, int channel) : pwm_pin_(pwm_pin), channel_(channel) {}
+  Motor(int pwm_pin, int channel) : pwm_pin_(pwm_pin), driver_(channel) {}
 
   void init() {
     pinMode(pwm_pin_, OUTPUT);
     // PWM frequency is drive frequency * 128 (DRV2605 datasheet page 14).
     ledcAttach(pwm_pin_, TARGET_DRIVE_FREQUENCY * 128, 8);
-    InitDriver(channel_);
+    driver_.init();
   }
 
   void on() { ledcWrite(pwm_pin_, ACTIVE_DUTY_CYCLE); }
   void off() { ledcWrite(pwm_pin_, INACTIVE_DUTY_CYCLE); }
+  
+  DRV2605& getDriver() { return driver_; }
 
  private:
   const int pwm_pin_;
-  const int channel_;
+  DRV2605 driver_;
 };
 
 //**********************************************************************************
@@ -136,23 +178,8 @@ void Shutdown(bool with_flashing_leds = true) {
   esp_deep_sleep_start();
 }
 
-float ReadVBatt() {
-  // Use the currently selected driver to read battery voltage.
-  return static_cast<float>(ReadDriverRegister(DRV2605_REG_VBATT)) * 5.6f / 255.0f;
-}
-
 constexpr float LOW_BATT_THRESHOLD = 3.2f;  // This is quite high, but lower than this and we start getting brown out resets at high power.
 float vbatt;
-
-bool BatteryOK() {
-  static int low_battery_iterations = 0;
-  vbatt = ReadVBatt();
-  if (vbatt >= LOW_BATT_THRESHOLD) {
-    low_battery_iterations = 0;
-    return true;
-  }
-  return ++low_battery_iterations < 4;
-}
 
 //**********************************************************************************
 // Sequence control
@@ -172,6 +199,16 @@ constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns) / siz
 // Motor control
 Motor motors[] = { Motor(0, 0), Motor(1, 1), Motor(4, 2), Motor(3, 3) };
 constexpr int NUM_MOTORS = sizeof(motors) / sizeof(motors[0]);
+
+bool BatteryOK() {
+  static int low_battery_iterations = 0;
+  vbatt = motors[0].getDriver().getVBatt(); // Any motor will do.
+  if (vbatt >= LOW_BATT_THRESHOLD) {
+    low_battery_iterations = 0;
+    return true;
+  }
+  return ++low_battery_iterations < 4;
+}
 
 constexpr int PULSE_DURATION = pdMS_TO_TICKS(100);
 constexpr int PAUSE_DURATION = pdMS_TO_TICKS(66);
