@@ -38,6 +38,9 @@ constexpr uint8_t DRV2605_REG_FEEDBACK = 0x1A;
 constexpr uint8_t DRV2605_REG_CONTROL3 = 0x1D;
 constexpr uint8_t DRV2605_REG_VBATT = 0x21;
 
+constexpr uint8_t DRV2605_LRA_MODE = 0x80;
+constexpr uint8_t DRV2605_LRA_OPEN_LOOP = 0x01;
+
 void I2CBegin() {
   Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK_FREQUENCY);
 }
@@ -80,8 +83,8 @@ void InitDriver(uint8_t channel) {
   // This init sequence is adapted from the Adafruit DRV2605 library.
   WriteDriverRegister(DRV2605_REG_MODE, 0x03);  // out of standby and into PWM input mode.
 
-  WriteDriverRegister(DRV2605_REG_FEEDBACK, ReadDriverRegister(DRV2605_REG_FEEDBACK) | 0x80);  // LRA mode.
-  WriteDriverRegister(DRV2605_REG_CONTROL3, ReadDriverRegister(DRV2605_REG_CONTROL3) | 0x01);  // LRA open loop mode.
+  WriteDriverRegister(DRV2605_REG_FEEDBACK, ReadDriverRegister(DRV2605_REG_FEEDBACK) | DRV2605_LRA_MODE);
+  WriteDriverRegister(DRV2605_REG_CONTROL3, ReadDriverRegister(DRV2605_REG_CONTROL3) | DRV2605_LRA_OPEN_LOOP);
 }
 
 // The chip expects a PWM signal where duty cycle 50 means stopped, and 255 is full speed in one phase, 0 full speed in the opposite phase.
