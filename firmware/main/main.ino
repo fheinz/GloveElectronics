@@ -11,7 +11,6 @@
 
 constexpr int LED_PIN = 21;
 constexpr int SYNC_SERVER_CLIENT_SELECT_PIN = 5;  // high = server, low = client
-constexpr int PWM_PINS[4] = { 0, 1, 4, 3 };
 
 // PIN 20 is an output on the client, and an input on the server.
 // If they are connected together (ideally through a 1kOhm resistor for safety),
@@ -33,7 +32,6 @@ constexpr int SCL_PIN = 2;
 constexpr uint16_t I2C_MUX_ADDR = 0x70;
 constexpr uint32_t I2C_CLOCK_FREQUENCY = 400000;
 constexpr uint16_t DRV2605_I2C_ADDR = 0x5A;
-constexpr uint8_t NUM_CHANNELS = 4;
 
 constexpr uint8_t DRV2605_REG_MODE = 0x01;
 constexpr uint8_t DRV2605_REG_FEEDBACK = 0x1A;
@@ -67,6 +65,50 @@ uint8_t ReadDriverRegister(uint8_t reg_addr) {
   Wire.endTransmission();
   return buf[0];
 }
+
+//**********************************************************************************
+// Motor control
+
+void InitDriver(uint8_t channel) {
+  digitalWrite(DRV_EN_PIN, HIGH);
+
+  SetI2CChannel(channel);
+
+  // Wait 250 microseconds for the driver to be ready (datasheet page 53).
+  delayMicroseconds(250);
+
+  // This init sequence is adapted from the Adafruit DRV2605 library.
+  WriteDriverRegister(DRV2605_REG_MODE, 0x03);  // out of standby and into PWM input mode.
+
+  WriteDriverRegister(DRV2605_REG_FEEDBACK, ReadDriverRegister(DRV2605_REG_FEEDBACK) | 0x80);  // LRA mode.
+  WriteDriverRegister(DRV2605_REG_CONTROL3, ReadDriverRegister(DRV2605_REG_CONTROL3) | 0x01);  // LRA open loop mode.
+}
+
+// The chip expects a PWM signal where duty cycle 50 means stopped, and 255 is full speed in one phase, 0 full speed in the opposite phase.
+// Though for signal reasons we can't actually use 0% and 100%.
+// This should ideally be configurable at run time, we should figure out a UI (maybe a phone app?).
+constexpr uint16_t ACTIVE_DUTY_CYCLE = 250;
+constexpr uint16_t INACTIVE_DUTY_CYCLE = 128;
+constexpr int TARGET_DRIVE_FREQUENCY = 250;  // 250 Hz according to Pfeifer et al. 2021
+
+class Motor {
+ public:
+  Motor(int pwm_pin, int channel) : pwm_pin_(pwm_pin), channel_(channel) {}
+
+  void init() {
+    pinMode(pwm_pin_, OUTPUT);
+    // PWM frequency is drive frequency * 128 (DRV2605 datasheet page 14).
+    ledcAttach(pwm_pin_, TARGET_DRIVE_FREQUENCY * 128, 8);
+    InitDriver(channel_);
+  }
+
+  void on() { ledcWrite(pwm_pin_, ACTIVE_DUTY_CYCLE); }
+  void off() { ledcWrite(pwm_pin_, INACTIVE_DUTY_CYCLE); }
+
+ private:
+  const int pwm_pin_;
+  const int channel_;
+};
 
 //**********************************************************************************
 // Power management
@@ -125,33 +167,14 @@ constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns) / siz
 
 //**********************************************************************************
 // Motor control
+Motor motors[] = { Motor(0, 0), Motor(1, 1), Motor(4, 2), Motor(3, 3) };
+constexpr int NUM_MOTORS = sizeof(motors) / sizeof(motors[0]);
 
-constexpr int TARGET_DRIVE_FREQUENCY = 250;  // 250 Hz according to Pfeifer et al. 2021
 constexpr int PULSE_DURATION = pdMS_TO_TICKS(100);
 constexpr int PAUSE_DURATION = pdMS_TO_TICKS(66);
 constexpr int ACTIVE_CYCLE_DURATION = 4 * (PULSE_DURATION + PAUSE_DURATION);
 
-// The chip expects a PWM signal where duty cycle 50 means stopped, and 255 is full speed in one phase, 0 full speed in the opposite phase.
-// Though for signal reasons we can't actually use 0% and 100%.
-// This should ideally be configurable at run time, we should figure out a UI (maybe a phone app?)
-constexpr uint16_t ACTIVE_DUTY_CYCLE = 250;
-
 volatile int current_pattern = -1;
-
-void InitDriver(uint8_t channel) {
-  digitalWrite(DRV_EN_PIN, HIGH);
-
-  SetI2CChannel(channel);
-
-  // Wait 250 microseconds for the driver to be ready (datasheet page 53).
-  delayMicroseconds(250);
-
-  // This init sequence is adapted from the Adafruit DRV2605 library.
-  WriteDriverRegister(DRV2605_REG_MODE, 0x03);  // out of standby and into PWM input mode.
-
-  WriteDriverRegister(DRV2605_REG_FEEDBACK, ReadDriverRegister(DRV2605_REG_FEEDBACK) | 0x80);  // LRA mode.
-  WriteDriverRegister(DRV2605_REG_CONTROL3, ReadDriverRegister(DRV2605_REG_CONTROL3) | 0x01);  // LRA open loop mode.
-}
 
 void RunMotors(int pattern, bool is_client) {
   Serial.printf("%010u Running sequence %02d\n", xTaskGetTickCount(), pattern);
@@ -169,12 +192,12 @@ void RunMotors(int pattern, bool is_client) {
     digitalWrite(SYNC_PIN, HIGH);
   }
 
-  for (int ch = 0; ch < NUM_CHANNELS; ++ch, seq >>= 2) {
+  for (int ch = 0; ch < NUM_MOTORS; ++ch, seq >>= 2) {
     int finger = seq & 0x03;
-    ledcWrite(PWM_PINS[finger], ACTIVE_DUTY_CYCLE);
+    motors[finger].on();
     digitalWrite(LED_PIN, HIGH);
     vTaskDelay(PULSE_DURATION);
-    ledcWrite(PWM_PINS[finger], 128);
+    motors[finger].off();
     digitalWrite(LED_PIN, LOW);
     // Doing the skew computation here assumes that the skew is < 100ms, which should be safe
     if (ch == 0) {
@@ -449,12 +472,8 @@ void setup() {
   pinMode(SYNC_SERVER_CLIENT_SELECT_PIN, INPUT_PULLUP);
   I2CBegin();
 
-  for (int i = 0; i < NUM_CHANNELS; ++i) {
-    pinMode(PWM_PINS[i], OUTPUT);
-
-    // PWM frequency is drive frequency * 128 (DRV2605 datasheet page 14).
-    ledcAttach(PWM_PINS[i], TARGET_DRIVE_FREQUENCY * 128, 8);
-    InitDriver(i);
+  for (auto& motor : motors) {
+    motor.init();
   }
 
   bool is_ble_server = digitalRead(SYNC_SERVER_CLIENT_SELECT_PIN) == HIGH;
