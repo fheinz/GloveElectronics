@@ -183,10 +183,10 @@ float vbatt;
 
 //**********************************************************************************
 // Sequence control
-#define VIBRATION_PATTERN(a, b, c, d) ((uint8_t)(((a)&0x03) | (((b)&0x03) << 2) | (((c)&0x03) << 4) | (((d)&0x03) << 6)))
 #define VIBRATION_PATTERNS(a, b, c, d) VIBRATION_PATTERNS3(a, b, c, d), VIBRATION_PATTERNS3(b, a, c, d), VIBRATION_PATTERNS3(c, a, b, d), VIBRATION_PATTERNS3(d, a, b, c)
 #define VIBRATION_PATTERNS3(a, b, c, d) VIBRATION_PATTERNS2(a, b, c, d), VIBRATION_PATTERNS2(a, c, b, d), VIBRATION_PATTERNS2(a, d, b, c)
-#define VIBRATION_PATTERNS2(a, b, c, d) VIBRATION_PATTERNS(a, b, c, d), VIBRATION_PATTERNS(a, b, d, c)
+#define VIBRATION_PATTERNS2(a, b, c, d) VIBRATION_PATTERN(a, b, c, d), VIBRATION_PATTERN(a, b, d, c)
+#define VIBRATION_PATTERN(a, b, c, d) ((uint8_t)(((a)&0x03) | (((b)&0x03) << 2) | (((c)&0x03) << 4) | (((d)&0x03) << 6)))
 
 
 // All possible sequences
