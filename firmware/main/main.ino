@@ -351,7 +351,7 @@ static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, siz
   SyncMessage message;
 
   if (len != sizeof(message)) {
-    Serial.printf("Wrong data length: %u, expected %d", len, sizeof(message));
+    Serial.printf("Wrong data length: %u, expected %d\n", len, sizeof(message));
     return;
   }
 
