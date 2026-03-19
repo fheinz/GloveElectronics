@@ -42,6 +42,32 @@ constexpr uint8_t DRV2605_REG_VBATT = 0x21;
 constexpr uint8_t DRV2605_LRA_MODE = 0x80;
 constexpr uint8_t DRV2605_LRA_OPEN_LOOP = 0x01;
 
+class I2CMux {
+ public:
+  I2CMux() : current_channel_(-1) {}
+
+  void init() {
+    digitalWrite(DRV_EN_PIN, HIGH);
+    Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK_FREQUENCY);
+    // Wait for the driver to be ready (datasheet page 53).
+    delayMicroseconds(250);
+  }
+
+  void selectChannel(uint8_t channel) {
+    if (channel != current_channel_) {
+      Wire.beginTransmission(I2C_MUX_ADDR);
+      Wire.write(1 << channel);
+      Wire.endTransmission();
+      current_channel_ = channel;
+    }
+  }
+
+ private:
+  int current_channel_;
+};
+
+I2CMux i2c_mux;
+
 class DRV2605 {
  public:
   DRV2605(uint8_t channel) : channel_(channel) {}
@@ -55,47 +81,41 @@ class DRV2605 {
   }
 
   float getVBatt() {
-    _selectChannel();
+    i2c_mux.selectChannel(channel_);
     return static_cast<float>(_readRegister(DRV2605_REG_VBATT)) * 5.6f / 255.0f;
   }
   
   void setMode(uint8_t mode) {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_MODE, mode);
   }
 
   uint8_t getMode() {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_MODE);
   }
   
   void setFeedback(uint8_t value) {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_FEEDBACK, value);
   }
 
   uint8_t getFeedback() {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_FEEDBACK);
   }
 
   void setControl3(uint8_t value) {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_CONTROL3, value);
   }
   
   uint8_t getControl3() {
-      _selectChannel();
+      i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_CONTROL3);
   }
 
  private:
-  void _selectChannel() {
-    Wire.beginTransmission(I2C_MUX_ADDR);
-    Wire.write(1 << channel_);
-    Wire.endTransmission();
-  }
-
   void _writeRegister(uint8_t reg_addr, uint8_t val) {
     uint8_t buf[2] = { reg_addr, val };
     Wire.beginTransmission(DRV2605_I2C_ADDR);
@@ -116,13 +136,6 @@ class DRV2605 {
 
   const uint8_t channel_;
 };
-
-void I2CBegin() {
-  digitalWrite(DRV_EN_PIN, HIGH);
-  Wire.begin(SDA_PIN, SCL_PIN, I2C_CLOCK_FREQUENCY);
-  // Wait for the driver to be ready (datasheet page 53).
-  delayMicroseconds(250);
-}
 
 //**********************************************************************************
 // Motor control
@@ -510,7 +523,7 @@ void setup() {
   pinMode(LED_PIN, OUTPUT);
   pinMode(DRV_EN_PIN, OUTPUT);
   pinMode(SYNC_SERVER_CLIENT_SELECT_PIN, INPUT_PULLUP);
-  I2CBegin();
+  i2c_mux.init();
 
   for (auto& motor : motors) {
     motor.init();
