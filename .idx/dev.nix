@@ -9,6 +9,7 @@
     pkgs.clang        # For C++
     pkgs.gnumake      # Standard build tools
     pkgs.cmake
+    pkgs.arduino-cli  # Arduino command line interface
     pkgs.swift        # The Swift toolchain
   ];
 
