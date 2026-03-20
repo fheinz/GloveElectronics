@@ -290,6 +290,8 @@ typedef struct {
 } PatternSyncMessage;
 
 volatile TickType_t next_motor_cycle_start;
+TaskHandle_t ble_task_handle = nullptr;
+TaskHandle_t motor_task_handle = nullptr;
 
 class GloveBLEServer : public BLEServerCallbacks {
  public:
@@ -405,6 +407,10 @@ class GloveBLEClient : public BLEClientCallbacks {
       Serial.printf(
         "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
         client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
+        
+      if (motor_task_handle != nullptr) {
+        xTaskNotifyGive(motor_task_handle);
+      }
     }
   }
 
@@ -521,12 +527,10 @@ void motor_client_task(void* parameter) {
   pinMode(SYNC_PIN, OUTPUT);
   digitalWrite(SYNC_PIN, LOW);
 
+  // Suspend this task indefinitely until the BLE client signals that the sync payload has arrived
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
   TickType_t last_wake_time = xTaskGetTickCount();
-
-  while (next_motor_cycle_start <= xTaskGetTickCount()) {
-    vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(10));
-  }
-
   vTaskDelayUntil(&last_wake_time, next_motor_cycle_start - last_wake_time);
   while (true) {
     glove.runMotors(true);
@@ -535,8 +539,6 @@ void motor_client_task(void* parameter) {
 }
 
 constexpr uint32_t TASK_STACK_SIZE = 10000;
-TaskHandle_t ble_task_handle;
-TaskHandle_t motor_task_handle;
 
 void setup() {
   Serial.begin();
