@@ -304,7 +304,7 @@ constexpr uint16_t BLE_SCAN_WINDOW = 0x10;      // 10ms (in 0.625ms units)
 constexpr uint16_t BLE_ADV_MIN_PREF_INTERVAL = 0x06;  // 7.5ms (Apple recommended minimum)
 constexpr uint16_t BLE_ADV_MAX_PREF_INTERVAL = 0x12;  // 22.5ms
 
-typedef struct {
+typedef struct __attribute__((packed)) {
   TickType_t sender_timestamp;
   TickType_t next_cycle_start;
   int pattern;
