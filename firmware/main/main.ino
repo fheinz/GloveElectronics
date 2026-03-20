@@ -70,9 +70,9 @@ I2CMux i2c_mux;
 
 class DRV2605 {
  public:
-  DRV2605(uint8_t channel) : channel_(channel) {}
+  constexpr DRV2605(uint8_t channel) : channel_(channel) {}
 
-  void init() {
+  void init() const {
     // This init sequence is adapted from the Adafruit DRV2605 library.
     // Puts the driver out of standby and into PWM input mode.
     setMode(DRV2605_MODE_PWM);
@@ -80,50 +80,50 @@ class DRV2605 {
     setControl3(getControl3() | DRV2605_LRA_OPEN_LOOP);
   }
 
-  float getVBatt() {
+  float getVBatt() const {
     i2c_mux.selectChannel(channel_);
     return static_cast<float>(_readRegister(DRV2605_REG_VBATT)) * 5.6f / 255.0f;
   }
   
-  void setMode(uint8_t mode) {
+  void setMode(uint8_t mode) const {
       i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_MODE, mode);
   }
 
-  uint8_t getMode() {
+  uint8_t getMode() const {
       i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_MODE);
   }
   
-  void setFeedback(uint8_t value) {
+  void setFeedback(uint8_t value) const {
       i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_FEEDBACK, value);
   }
 
-  uint8_t getFeedback() {
+  uint8_t getFeedback() const {
       i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_FEEDBACK);
   }
 
-  void setControl3(uint8_t value) {
+  void setControl3(uint8_t value) const {
       i2c_mux.selectChannel(channel_);
       _writeRegister(DRV2605_REG_CONTROL3, value);
   }
   
-  uint8_t getControl3() {
+  uint8_t getControl3() const {
       i2c_mux.selectChannel(channel_);
       return _readRegister(DRV2605_REG_CONTROL3);
   }
 
  private:
-  void _writeRegister(uint8_t reg_addr, uint8_t val) {
+  void _writeRegister(uint8_t reg_addr, uint8_t val) const {
     uint8_t buf[2] = { reg_addr, val };
     Wire.beginTransmission(DRV2605_I2C_ADDR);
     Wire.write(buf, 2);
     Wire.endTransmission();
   }
 
-  uint8_t _readRegister(uint8_t reg_addr) {
+  uint8_t _readRegister(uint8_t reg_addr) const {
     uint8_t buf[1] = { reg_addr };
     Wire.beginTransmission(DRV2605_I2C_ADDR);
     Wire.write(buf, 1);
@@ -149,19 +149,19 @@ constexpr int TARGET_DRIVE_FREQUENCY = 250;  // 250 Hz according to Pfeifer et a
 
 class Motor {
  public:
-  Motor(int pwm_pin, int channel) : pwm_pin_(pwm_pin), driver_(channel) {}
+  constexpr Motor(int pwm_pin, int channel) : pwm_pin_(pwm_pin), driver_(channel) {}
 
-  void init() {
+  void init() const {
     pinMode(pwm_pin_, OUTPUT);
     // PWM frequency is drive frequency * 128 (DRV2605 datasheet page 14).
     ledcAttach(pwm_pin_, TARGET_DRIVE_FREQUENCY * 128, 8);
     driver_.init();
   }
 
-  void on() { ledcWrite(pwm_pin_, ACTIVE_DUTY_CYCLE); }
-  void off() { ledcWrite(pwm_pin_, INACTIVE_DUTY_CYCLE); }
+  void on() const { ledcWrite(pwm_pin_, ACTIVE_DUTY_CYCLE); }
+  void off() const { ledcWrite(pwm_pin_, INACTIVE_DUTY_CYCLE); }
   
-  DRV2605& getDriver() { return driver_; }
+  const DRV2605& getDriver() const { return driver_; }
 
  private:
   const int pwm_pin_;
@@ -169,101 +169,108 @@ class Motor {
 };
 
 //**********************************************************************************
-// Power management
+// Device Management (Power, Sequence, Motors)
 
-const uint32_t TOTAL_RUN_TIME_S = 2 * 60 * 60;  // 2 hours.
-
-void Shutdown(bool with_flashing_leds = true) {
-  digitalWrite(DRV_EN_PIN, LOW);
-  digitalWrite(LED_PIN, LOW);
-  if (with_flashing_leds) {
-    for (int i = 0; i < 3; ++i) {
-      digitalWrite(LED_PIN, HIGH);
-      delay(300);
-      digitalWrite(LED_PIN, LOW);
-      delay(300);
-    }
-  } else {
-    delay(100);  // Wait for any potentially in-flight I2C transmissions to finish.
-  }
-  // Go into permanent deep sleep, which is the lowest power state we can access from
-  // firmware.
-  esp_deep_sleep_start();
-}
-
-constexpr float LOW_BATT_THRESHOLD = 3.2f;  // This is quite high, but lower than this and we start getting brown out resets at high power.
-float vbatt;
-
-//**********************************************************************************
-// Sequence control
-#define VIBRATION_PATTERNS(a, b, c, d) VIBRATION_PATTERNS3(a, b, c, d), VIBRATION_PATTERNS3(b, a, c, d), VIBRATION_PATTERNS3(c, a, b, d), VIBRATION_PATTERNS3(d, a, b, c)
-#define VIBRATION_PATTERNS3(a, b, c, d) VIBRATION_PATTERNS2(a, b, c, d), VIBRATION_PATTERNS2(a, c, b, d), VIBRATION_PATTERNS2(a, d, b, c)
-#define VIBRATION_PATTERNS2(a, b, c, d) VIBRATION_PATTERN(a, b, c, d), VIBRATION_PATTERN(a, b, d, c)
-#define VIBRATION_PATTERN(a, b, c, d) ((uint8_t)(((a)&0x03) | (((b)&0x03) << 2) | (((c)&0x03) << 4) | (((d)&0x03) << 6)))
-
-
-// All possible sequences
-constexpr uint8_t vibration_patterns[] = {
-  VIBRATION_PATTERNS(0, 1, 2, 3)
-};
-constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns) / sizeof(vibration_patterns[0]);
-
-//**********************************************************************************
-// Motor control
-Motor motors[] = { Motor(0, 0), Motor(1, 1), Motor(4, 2), Motor(3, 3) };
-constexpr int NUM_MOTORS = sizeof(motors) / sizeof(motors[0]);
-
-bool BatteryOK() {
-  static int low_battery_iterations = 0;
-  vbatt = motors[0].getDriver().getVBatt(); // Any motor will do.
-  if (vbatt >= LOW_BATT_THRESHOLD) {
-    low_battery_iterations = 0;
-    return true;
-  }
-  return ++low_battery_iterations < 4;
-}
+constexpr float LOW_BATT_THRESHOLD = 3.2f;
+const uint32_t TOTAL_RUN_TIME_S = 2 * 60 * 60;
 
 constexpr int PULSE_DURATION = pdMS_TO_TICKS(100);
 constexpr int PAUSE_DURATION = pdMS_TO_TICKS(66);
 constexpr int ACTIVE_CYCLE_DURATION = 4 * (PULSE_DURATION + PAUSE_DURATION);
 
-volatile int current_pattern = -1;
+#define VIBRATION_PATTERNS(a, b, c, d) VIBRATION_PATTERNS3(a, b, c, d), VIBRATION_PATTERNS3(b, a, c, d), VIBRATION_PATTERNS3(c, a, b, d), VIBRATION_PATTERNS3(d, a, b, c)
+#define VIBRATION_PATTERNS3(a, b, c, d) VIBRATION_PATTERNS2(a, b, c, d), VIBRATION_PATTERNS2(a, c, b, d), VIBRATION_PATTERNS2(a, d, b, c)
+#define VIBRATION_PATTERNS2(a, b, c, d) VIBRATION_PATTERN(a, b, c, d), VIBRATION_PATTERN(a, b, d, c)
+#define VIBRATION_PATTERN(a, b, c, d) ((uint8_t)(((a)&0x03) | (((b)&0x03) << 2) | (((c)&0x03) << 4) | (((d)&0x03) << 6)))
 
-void RunMotors(int pattern, bool is_client) {
-  Serial.printf("%010u Running sequence %02d\n", xTaskGetTickCount(), pattern);
+class Glove {
+ public:
+  Glove() : vbatt_(0.0f), current_pattern_(-1) {}
 
-  if (pattern < 0) {
-    vTaskDelay(pdMS_TO_TICKS(ACTIVE_CYCLE_DURATION));
-    return;
+  void init() {
+    for (auto& motor : motors_) motor.init();
   }
 
-  uint32_t start_time = millis();
-
-  uint8_t seq = vibration_patterns[pattern];
-  if (is_client) {
-    seq = ~seq;
-    digitalWrite(SYNC_PIN, HIGH);
-  }
-
-  for (int ch = 0; ch < NUM_MOTORS; ++ch, seq >>= 2) {
-    int finger = seq & 0x03;
-    motors[finger].on();
-    digitalWrite(LED_PIN, HIGH);
-    vTaskDelay(PULSE_DURATION);
-    motors[finger].off();
+  void shutdown(bool with_flashing_leds = true) {
+    digitalWrite(DRV_EN_PIN, LOW);
     digitalWrite(LED_PIN, LOW);
-    // Doing the skew computation here assumes that the skew is < 100ms, which should be safe
-    if (ch == 0) {
-      if (is_client) {
-        digitalWrite(SYNC_PIN, LOW);
-      } else if (sync_time != 0) {
-        Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - sync_time);
+    if (with_flashing_leds) {
+      for (int i = 0; i < 3; ++i) {
+        digitalWrite(LED_PIN, HIGH);
+        delay(300);
+        digitalWrite(LED_PIN, LOW);
+        delay(300);
       }
+    } else {
+      delay(100);
     }
-    vTaskDelay(PAUSE_DURATION);
+    esp_deep_sleep_start();
   }
-  Serial.printf("%010u Done sequence %02d\n", xTaskGetTickCount(), pattern);
-}
+
+  bool isBatteryOK() {
+    static int low_battery_iterations = 0;
+    vbatt_ = motors_[0].getDriver().getVBatt();
+    if (vbatt_ >= LOW_BATT_THRESHOLD) {
+      low_battery_iterations = 0;
+      return true;
+    }
+    return ++low_battery_iterations < 4;
+  }
+
+  float getBatteryVoltage() const { return vbatt_; }
+  void setCurrentPattern(int pattern) { current_pattern_ = pattern; }
+  int getCurrentPattern() const { return current_pattern_; }
+  static constexpr unsigned int getNumPatterns() { return NUM_VIBRATION_PATTERNS; }
+
+  void runMotors(bool is_client) {
+    int pattern = current_pattern_;
+    Serial.printf("%010u Running pattern #%02d\n", xTaskGetTickCount(), pattern);
+
+    if (pattern < 0) {
+      vTaskDelay(pdMS_TO_TICKS(ACTIVE_CYCLE_DURATION));
+      return;
+    }
+
+    uint32_t start_time = millis();
+    uint8_t seq = vibration_patterns_[pattern];
+    
+    if (is_client) {
+      seq = ~seq;
+      digitalWrite(SYNC_PIN, HIGH);
+    }
+    Serial.printf("%010u Sequence 0x%02x\n", xTaskGetTickCount(), seq);
+
+    for (int ch = 0; ch < NUM_MOTORS; ++ch, seq >>= 2) {
+      int finger = seq & 0x03;
+      motors_[finger].on();
+      digitalWrite(LED_PIN, HIGH);
+      vTaskDelay(PULSE_DURATION);
+      motors_[finger].off();
+      digitalWrite(LED_PIN, LOW);
+      
+      if (ch == 0) {
+        if (is_client) {
+          digitalWrite(SYNC_PIN, LOW);
+        } else if (sync_time != 0) {
+          Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - sync_time);
+        }
+      }
+      vTaskDelay(PAUSE_DURATION);
+    }
+    Serial.printf("%010u Done pattern #%02d\n", xTaskGetTickCount(), pattern);
+  }
+
+ private:
+  static constexpr Motor motors_[] = { Motor(0, 0), Motor(1, 1), Motor(4, 2), Motor(3, 3) };
+  static constexpr int NUM_MOTORS = sizeof(motors_) / sizeof(motors_[0]);
+  static constexpr uint8_t vibration_patterns_[] = { VIBRATION_PATTERNS(0, 1, 2, 3) };
+  static constexpr unsigned int NUM_VIBRATION_PATTERNS = sizeof(vibration_patterns_) / sizeof(vibration_patterns_[0]);
+  
+  float vbatt_;
+  volatile int current_pattern_;
+};
+
+Glove glove;
 
 //**********************************************************************************
 // Bluetooth
@@ -315,7 +322,7 @@ void StartBLEServer() {
   service = server->createService(SERVICE_UUID);
   characteristic = service->createCharacteristic(
     CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  SetSyncMessage(next_motor_cycle_start, current_pattern);
+  SetSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
   service->start();
 
   advertising = BLEDevice::getAdvertising();
@@ -336,7 +343,7 @@ void BLEServerLoop() {
     advertising->start();
   }
   if (device_connected) {
-    SetSyncMessage(next_motor_cycle_start, current_pattern);
+    SetSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
     characteristic->notify();
   }
   last_device_connected = device_connected;
@@ -371,7 +378,7 @@ static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, siz
   memcpy(&message, data, len);
   TickType_t server_ticks = message.sender_timestamp;
   TickType_t next_cycle_start = message.next_cycle_start;
-  current_pattern = message.pattern;
+  glove.setCurrentPattern(message.pattern);
 
   if (last_cycle_start_received != next_cycle_start) {
     int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
@@ -385,7 +392,7 @@ static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, siz
     next_motor_cycle_start = next_cycle_start + tick_drift;
     Serial.printf(
       "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
-      client_ticks, server_ticks, next_cycle_start, current_pattern, next_motor_cycle_start, tick_drift, current_pattern);
+      client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
   }
 }
 
@@ -485,14 +492,14 @@ void motor_server_task(void* parameter) {
 
   while (true) {
     // Select a pattern. 
-    current_pattern = (cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(NUM_VIBRATION_PATTERNS) : -1;
+    glove.setCurrentPattern((cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(Glove::getNumPatterns()) : -1);
     // Wait for the start of the new cycle. The BLE cycle runs on a higher frequency, so this wait should give it
     // plenty of oportunity to communicate the new pattern to the client in time for it to execute it in sync.
     next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
     vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
     // Execute the pattern, the client ought to have gotten the memo by this time and, depending on the accuracy of
     // our sync, be executing it around now too.
-    RunMotors(current_pattern, false);
+    glove.runMotors(false);
   }
 }
 
@@ -508,7 +515,7 @@ void motor_client_task(void* parameter) {
 
   vTaskDelayUntil(&last_wake_time, next_motor_cycle_start - last_wake_time);
   while (true) {
-    RunMotors(current_pattern, true);
+    glove.runMotors(true);
     vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
   }
 }
@@ -525,9 +532,7 @@ void setup() {
   pinMode(SYNC_SERVER_CLIENT_SELECT_PIN, INPUT_PULLUP);
   i2c_mux.init();
 
-  for (auto& motor : motors) {
-    motor.init();
-  }
+  glove.init();
 
   bool is_ble_server = digitalRead(SYNC_SERVER_CLIENT_SELECT_PIN) == HIGH;
 
@@ -544,13 +549,13 @@ void setup() {
 
 // Low-priority housekeeping
 void loop() {
-  if (!BatteryOK()) {
-    Serial.printf("Low battery (%fv). Shutting down\n", vbatt);
-    Shutdown();
+  if (!glove.isBatteryOK()) {
+    Serial.printf("Low battery (%fv). Shutting down\n", glove.getBatteryVoltage());
+    glove.shutdown();
   }
 
   if (millis() > (TOTAL_RUN_TIME_S * 1000)) {
     Serial.println("We are done! Shutting down now");
-    Shutdown(false);
+    glove.shutdown(false);
   }
 }
