@@ -275,183 +275,197 @@ Glove glove;
 //**********************************************************************************
 // Bluetooth
 
-// Bluetooth Low Energy params.
-// These are our randomly generated unique Service and Characteristic UUIDs, so the gloves can recognise each other.
 constexpr char* SERVICE_UUID = "21014a2d-ebee-4fcb-b8d4-dcf34c19610a";
-
-// The server sends its clock and pattern to execute to the client so they remain in sync.
-constexpr char* CHARACTERISTIC_UUID = "44f21c6b-b08b-4695-970f-f21a15b538db";
-
+constexpr char* PATTERN_SYNC_CHARACTERISTIC_UUID = "44f21c6b-b08b-4695-970f-f21a15b538db";
 constexpr int BLE_SCAN_TIME_S = 5;
+constexpr uint16_t BLE_SCAN_INTERVAL = 0x10;    // 10ms (in 0.625ms units)
+constexpr uint16_t BLE_SCAN_WINDOW = 0x10;      // 10ms (in 0.625ms units)
+constexpr uint16_t BLE_ADV_MIN_PREF_INTERVAL = 0x06;  // 7.5ms (Apple recommended minimum)
+constexpr uint16_t BLE_ADV_MAX_PREF_INTERVAL = 0x12;  // 22.5ms
 
 typedef struct {
   TickType_t sender_timestamp;
   TickType_t next_cycle_start;
   int pattern;
-} SyncMessage;
+} PatternSyncMessage;
 
-// For BLE server.
-BLEServer* server = nullptr;
-BLEService* service = nullptr;
-BLECharacteristic* characteristic = nullptr;
-BLEAdvertising* advertising = nullptr;
-volatile bool last_device_connected = false;
-volatile bool device_connected = false;
 volatile TickType_t next_motor_cycle_start;
 
-class ServerCallbacks : public BLEServerCallbacks {
-  void onConnect(BLEServer*) {
-    device_connected = true;
+class GloveBLEServer : public BLEServerCallbacks {
+ public:
+  GloveBLEServer() : server_(nullptr), service_(nullptr), pattern_sync_characteristic_(nullptr),
+                     advertising_(nullptr), device_connected_(false), last_device_connected_(false) {}
+
+  void init() {
+    BLEDevice::init("Vibrating Glove (Server)");
+    server_ = BLEDevice::createServer();
+    server_->setCallbacks(this);
+    service_ = server_->createService(SERVICE_UUID);
+    pattern_sync_characteristic_ = service_->createCharacteristic(
+      PATTERN_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+    setPatternSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
+    service_->start();
+
+    advertising_ = BLEDevice::getAdvertising();
+    advertising_->addServiceUUID(SERVICE_UUID);
+    advertising_->setScanResponse(true);
+    advertising_->setMinPreferred(BLE_ADV_MIN_PREF_INTERVAL);
+    advertising_->setMaxPreferred(BLE_ADV_MAX_PREF_INTERVAL);
+    advertising_->start();
+  }
+
+  void loop() {
+    if (device_connected_ && !last_device_connected_) {
+      advertising_->stop();
+    }
+    if (!device_connected_ && last_device_connected_) {
+      advertising_->start();
+    }
+    if (device_connected_) {
+      setPatternSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
+      pattern_sync_characteristic_->notify();
+    }
+    last_device_connected_ = device_connected_;
+  }
+
+ private:
+  void onConnect(BLEServer*) override {
+    device_connected_ = true;
     Serial.println("Client connected");
-  };
-  void onDisconnect(BLEServer*) {
-    device_connected = false;
+  }
+  
+  void onDisconnect(BLEServer*) override {
+    device_connected_ = false;
     Serial.println("Client disconnected");
   }
+
+  void setPatternSyncMessage(TickType_t next_cycle, int pattern) {
+    PatternSyncMessage message = { xTaskGetTickCount(), next_cycle, pattern };
+    pattern_sync_characteristic_->setValue((uint8_t*)&message, sizeof(message));
+  }
+
+  BLEServer* server_;
+  BLEService* service_;
+  BLECharacteristic* pattern_sync_characteristic_;
+  BLEAdvertising* advertising_;
+  volatile bool device_connected_;
+  volatile bool last_device_connected_;
 };
 
-void SetSyncMessage(TickType_t next_cycle, int pattern) {
-  SyncMessage message = { xTaskGetTickCount(), next_cycle, pattern };
-  characteristic->setValue((uint8_t*)&message, sizeof(message));
-}
+GloveBLEServer ble_server;
 
-void StartBLEServer() {
-  BLEDevice::init("Vibrating Glove (Server)");
-  server = BLEDevice::createServer();
-  server->setCallbacks(new ServerCallbacks());
-  service = server->createService(SERVICE_UUID);
-  characteristic = service->createCharacteristic(
-    CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-  SetSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
-  service->start();
+class GloveBLEClient : public BLEClientCallbacks {
+ public:
+  GloveBLEClient() : scan_(nullptr), client_(nullptr), connected_to_server_(false) {}
 
-  advertising = BLEDevice::getAdvertising();
-  advertising->addServiceUUID(SERVICE_UUID);
-  advertising->setScanResponse(true);
-  advertising->setMinPreferred(0x06);  // This is apparently required for iPhones? Do we care?
-  advertising->setMaxPreferred(0x12);
-  advertising->start();
-}
-
-void BLEServerLoop() {
-  if (device_connected && !last_device_connected) {
-    // We have a new connection, and can stop advertising.
-    advertising->stop();
+  void init() {
+    BLEDevice::init("Vibrating Glove (Client)");
+    scan_ = BLEDevice::getScan();
+    scan_->setActiveScan(true);
+    scan_->setInterval(BLE_SCAN_INTERVAL);
+    scan_->setWindow(BLE_SCAN_WINDOW);
+    client_ = BLEDevice::createClient();
   }
-  if (!device_connected && last_device_connected) {
-    // Client has disconnected. Start advertising again.
-    advertising->start();
-  }
-  if (device_connected) {
-    SetSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
-    characteristic->notify();
-  }
-  last_device_connected = device_connected;
-}
 
-// For BLE client.
-volatile bool connected_to_server = false;
-BLEScan* scan = nullptr;
-BLEClient* client = nullptr;
+  void loop() {
+    if (!(connected_to_server_ || connectToServer())) return;
+  }
 
-class ClientCallbacks : public BLEClientCallbacks {
-  void onConnect(BLEClient* pclient) {
+ private:
+  void onConnect(BLEClient* pclient) override {
     Serial.println("Connected to server");
   }
 
-  void onDisconnect(BLEClient* pclient) {
-    connected_to_server = false;
+  void onDisconnect(BLEClient* pclient) override {
+    connected_to_server_ = false;
     Serial.println("Disconnected from server");
   }
-};
 
-static void ClientNotifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool is_notify) {
-  static TickType_t last_cycle_start_received = 0;
-  TickType_t client_ticks = xTaskGetTickCount();
-  SyncMessage message;
+  static void notifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool is_notify) {
+    static TickType_t last_cycle_start_received = 0;
+    TickType_t client_ticks = xTaskGetTickCount();
+    PatternSyncMessage message;
 
-  if (len != sizeof(message)) {
-    Serial.printf("Wrong data length: %u, expected %d\n", len, sizeof(message));
-    return;
-  }
+    if (len != sizeof(message)) {
+      Serial.printf("Wrong data length: %u, expected %d\n", len, sizeof(message));
+      return;
+    }
 
-  memcpy(&message, data, len);
-  TickType_t server_ticks = message.sender_timestamp;
-  TickType_t next_cycle_start = message.next_cycle_start;
-  glove.setCurrentPattern(message.pattern);
+    memcpy(&message, data, len);
+    TickType_t server_ticks = message.sender_timestamp;
+    TickType_t next_cycle_start = message.next_cycle_start;
+    glove.setCurrentPattern(message.pattern);
 
-  if (last_cycle_start_received != next_cycle_start) {
-    int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
+    if (last_cycle_start_received != next_cycle_start) {
+      int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
+      tick_drift -= 15; 
 
-    // HORRIBLE HACK: experiments show that the actual drift is generally at 15±10 ms.
-    // Biasing the clock drift by -15ms we should minimize the actual drift.
-    // Maybe switching to ESP-NOW can help us make this less awkward.
-    tick_drift -= 15; 
-
-    last_cycle_start_received = next_cycle_start;
-    next_motor_cycle_start = next_cycle_start + tick_drift;
-    Serial.printf(
-      "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
-      client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
-  }
-}
-
-void StartBLEClient() {
-  BLEDevice::init("Vibrating Glove (Client)");
-  scan = BLEDevice::getScan();
-  scan->setActiveScan(true);
-  scan->setInterval(0x10);  // 10ms.
-  scan->setWindow(0x10);    // 10ms.
-  client = BLEDevice::createClient();
-}
-
-bool BLEConnectToServer() {
-  static ClientCallbacks* client_callbacks = nullptr;
-
-  if (connected_to_server) return true;
-
-  if (!client_callbacks) client_callbacks = new ClientCallbacks();
-
-  BLEScanResults* found_devices = scan->start(BLE_SCAN_TIME_S, false);
-  Serial.print("Devices found: ");
-  Serial.println(found_devices->getCount());
-  for (int dev_id = 0; dev_id < found_devices->getCount(); ++dev_id) {
-    auto remote_device = found_devices->getDevice(dev_id);
-    BLEUUID service_uuid = remote_device.getServiceUUID();
-    if (service_uuid.equals(BLEUUID(SERVICE_UUID))) {
-      Serial.println("Found a device! Validating...");
-      client->setClientCallbacks(client_callbacks);
-      client->connect(&remote_device);
-      BLERemoteService* remote_service = client->getService(SERVICE_UUID);  //do we ever need to free this?
-      if (remote_service == nullptr) {
-        Serial.println("We don't have the right service?");
-        client->disconnect();
-        continue;
-      }
-      BLERemoteCharacteristic* remote_characteristic = remote_service->getCharacteristic(CHARACTERISTIC_UUID);
-      if (remote_characteristic == nullptr) {
-        Serial.println("We don't have the right characteristic?");
-        client->disconnect();
-        continue;
-      }
-      if (!remote_characteristic->canRead() || !remote_characteristic->canNotify()) {
-        Serial.println("Wrong characteristic capabilities set on server");
-        client->disconnect();
-        continue;
-      }
-      remote_characteristic->registerForNotify(ClientNotifyCallback);
-      connected_to_server = true;
-      break;
+      last_cycle_start_received = next_cycle_start;
+      next_motor_cycle_start = next_cycle_start + tick_drift;
+      Serial.printf(
+        "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
+        client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
     }
   }
-  scan->clearResults();
-  return connected_to_server;
-}
 
-void BLEClientLoop() {
-  if (!(connected_to_server || BLEConnectToServer())) return;
-}
+  using NotifyCb = void (*)(BLERemoteCharacteristic*, uint8_t*, size_t, bool);
 
+  bool bindCharacteristic(BLERemoteService* remote_service, const char* char_uuid, NotifyCb cb = nullptr) {
+    BLERemoteCharacteristic* rx_char = remote_service->getCharacteristic(char_uuid);
+    if (rx_char == nullptr) {
+      Serial.printf("Characteristic %s not found on server\n", char_uuid);
+      return false;
+    }
+    
+    if (cb != nullptr) {
+      if (!rx_char->canNotify()) {
+        Serial.printf("Characteristic %s does not support notify capabilities\n", char_uuid);
+        return false;
+      }
+      rx_char->registerForNotify(cb);
+    }
+    return true;
+  }
+
+  bool connectToServer() {
+    if (connected_to_server_) return true;
+
+    BLEScanResults* found_devices = scan_->start(BLE_SCAN_TIME_S, false);
+    Serial.print("Devices found: ");
+    Serial.println(found_devices->getCount());
+    for (int dev_id = 0; dev_id < found_devices->getCount(); ++dev_id) {
+      auto remote_device = found_devices->getDevice(dev_id);
+      BLEUUID service_uuid = remote_device.getServiceUUID();
+      if (service_uuid.equals(BLEUUID(SERVICE_UUID))) {
+        Serial.println("Found a device! Validating...");
+        client_->setClientCallbacks(this);
+        client_->connect(&remote_device);
+        BLERemoteService* remote_service = client_->getService(SERVICE_UUID);
+        if (remote_service == nullptr) {
+          Serial.println("We don't have the right service?");
+          client_->disconnect();
+          continue;
+        }
+
+        if (!bindCharacteristic(remote_service, PATTERN_SYNC_CHARACTERISTIC_UUID, notifyCallback)) {
+          client_->disconnect();
+          continue;
+        }
+
+        connected_to_server_ = true;
+        break;
+      }
+    }
+    scan_->clearResults();
+    return connected_to_server_;
+  }
+
+  BLEScan* scan_;
+  BLEClient* client_;
+  volatile bool connected_to_server_;
+};
+
+GloveBLEClient ble_client;
 
 //**********************************************************************************
 // Setup & Loop
@@ -461,19 +475,19 @@ const TickType_t ble_update_frequency = pdMS_TO_TICKS(100);
 void ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
-  StartBLEServer();
+  ble_server.init();
   while (true) {
     vTaskDelayUntil(&last_wake_time, ble_update_frequency);
-    BLEServerLoop();
+    ble_server.loop();
   }
 }
 
 void ble_client_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
-  StartBLEClient();
+  ble_client.init();
   while (true) {
-    BLEClientLoop();
+    ble_client.loop();
     vTaskDelayUntil(&last_wake_time, ble_update_frequency / 2);
   }
 }
