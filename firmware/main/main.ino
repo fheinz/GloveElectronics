@@ -17,11 +17,32 @@ constexpr int SYNC_SERVER_CLIENT_SELECT_PIN = 5;  // high = server, low = client
 // the server can use the signal being output by the client to measure how synchronized
 // they are.
 constexpr int SYNC_PIN = 20;
-volatile uint32_t sync_time = 0;
+class GloveApp {
+ public:
+  static inline volatile uint32_t sync_time = 0;
+  static inline volatile TickType_t next_motor_cycle_start = 0;
 
-void IRAM_ATTR sync_isr() {
-  sync_time = millis();
-}
+  static void IRAM_ATTR sync_isr() {
+    sync_time = millis();
+  }
+
+  static void notifyMotorTask() {
+    if (motor_task_handle_ != nullptr) {
+      xTaskNotifyGive(motor_task_handle_);
+    }
+  }
+
+  static void start(bool is_server);
+
+ private:
+  static inline TaskHandle_t ble_task_handle_ = nullptr;
+  static inline TaskHandle_t motor_task_handle_ = nullptr;
+
+  static void ble_server_task(void* parameter);
+  static void ble_client_task(void* parameter);
+  static void motor_server_task(void* parameter);
+  static void motor_client_task(void* parameter);
+};
 
 //**********************************************************************************
 // I2C device driver
@@ -251,8 +272,8 @@ class Glove {
       if (ch == 0) {
         if (is_client) {
           digitalWrite(SYNC_PIN, LOW);
-        } else if (sync_time != 0) {
-          Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - sync_time);
+        } else if (GloveApp::sync_time != 0) {
+          Serial.printf("%010u Skew %dms\n", xTaskGetTickCount(), start_time - GloveApp::sync_time);
         }
       }
       vTaskDelay(PAUSE_DURATION);
@@ -289,9 +310,7 @@ typedef struct {
   int pattern;
 } PatternSyncMessage;
 
-volatile TickType_t next_motor_cycle_start;
-TaskHandle_t ble_task_handle = nullptr;
-TaskHandle_t motor_task_handle = nullptr;
+// Thread resources stored in GloveApp
 
 class GloveBLEServer : public BLEServerCallbacks {
  public:
@@ -305,7 +324,7 @@ class GloveBLEServer : public BLEServerCallbacks {
     service_ = server_->createService(SERVICE_UUID);
     pattern_sync_characteristic_ = service_->createCharacteristic(
       PATTERN_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
-    setPatternSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
+    setPatternSyncMessage(GloveApp::next_motor_cycle_start, glove.getCurrentPattern());
     service_->start();
 
     advertising_ = BLEDevice::getAdvertising();
@@ -324,7 +343,7 @@ class GloveBLEServer : public BLEServerCallbacks {
       advertising_->start();
     }
     if (device_connected_) {
-      setPatternSyncMessage(next_motor_cycle_start, glove.getCurrentPattern());
+      setPatternSyncMessage(GloveApp::next_motor_cycle_start, glove.getCurrentPattern());
       pattern_sync_characteristic_->notify();
     }
     last_device_connected_ = device_connected_;
@@ -403,14 +422,12 @@ class GloveBLEClient : public BLEClientCallbacks {
       tick_drift -= 15; 
 
       last_cycle_start_received = next_cycle_start;
-      next_motor_cycle_start = next_cycle_start + tick_drift;
+      GloveApp::next_motor_cycle_start = next_cycle_start + tick_drift;
       Serial.printf(
         "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
-        client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
+        client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), GloveApp::next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
         
-      if (motor_task_handle != nullptr) {
-        xTaskNotifyGive(motor_task_handle);
-      }
+      GloveApp::notifyMotorTask();
     }
   }
 
@@ -478,7 +495,7 @@ GloveBLEClient ble_client;
 
 const TickType_t ble_update_frequency = pdMS_TO_TICKS(100);
 
-void ble_server_task(void* parameter) {
+void GloveApp::ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
   ble_server.init();
@@ -488,7 +505,7 @@ void ble_server_task(void* parameter) {
   }
 }
 
-void ble_client_task(void* parameter) {
+void GloveApp::ble_client_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
   ble_client.init();
@@ -503,9 +520,9 @@ constexpr TickType_t FULL_CYCLE_LENGTH = pdMS_TO_TICKS(1000);
 constexpr unsigned int CYCLES_PER_ROUND = 5;
 constexpr unsigned int ACTIVE_CYCLES_PER_ROUND = 3;
 
-void motor_server_task(void* parameter) {
+void GloveApp::motor_server_task(void* parameter) {
   pinMode(SYNC_PIN, INPUT);
-  attachInterrupt(SYNC_PIN, sync_isr, RISING);
+  attachInterrupt(SYNC_PIN, GloveApp::sync_isr, RISING);
   int cycle_number = 0;
 
   TickType_t last_wake_time = xTaskGetTickCount();
@@ -515,7 +532,7 @@ void motor_server_task(void* parameter) {
     glove.setCurrentPattern((cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(Glove::getNumPatterns()) : -1);
     // Wait for the start of the new cycle. The BLE cycle runs on a higher frequency, so this wait should give it
     // plenty of oportunity to communicate the new pattern to the client in time for it to execute it in sync.
-    next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
+    GloveApp::next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
     vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
     // Execute the pattern, the client ought to have gotten the memo by this time and, depending on the accuracy of
     // our sync, be executing it around now too.
@@ -523,7 +540,7 @@ void motor_server_task(void* parameter) {
   }
 }
 
-void motor_client_task(void* parameter) {
+void GloveApp::motor_client_task(void* parameter) {
   pinMode(SYNC_PIN, OUTPUT);
   digitalWrite(SYNC_PIN, LOW);
 
@@ -531,7 +548,7 @@ void motor_client_task(void* parameter) {
   ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
   TickType_t last_wake_time = xTaskGetTickCount();
-  vTaskDelayUntil(&last_wake_time, next_motor_cycle_start - last_wake_time);
+  vTaskDelayUntil(&last_wake_time, GloveApp::next_motor_cycle_start - last_wake_time);
   while (true) {
     glove.runMotors(true);
     vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
@@ -539,6 +556,18 @@ void motor_client_task(void* parameter) {
 }
 
 constexpr uint32_t TASK_STACK_SIZE = 10000;
+
+void GloveApp::start(bool is_server) {
+  Serial.printf("Starting %s tasks: ", is_server ? "server" : "client");
+  if (is_server) {
+    xTaskCreate(GloveApp::motor_server_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::motor_task_handle_);
+    xTaskCreate(GloveApp::ble_server_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::ble_task_handle_);
+  } else {
+    xTaskCreate(GloveApp::motor_client_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::motor_task_handle_);
+    xTaskCreate(GloveApp::ble_client_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::ble_task_handle_);
+  }
+  Serial.println(GloveApp::motor_task_handle_ && GloveApp::ble_task_handle_ ? "SUCCESS" : "FAILURE");
+}
 
 void setup() {
   Serial.begin();
@@ -551,16 +580,7 @@ void setup() {
   glove.init();
 
   bool is_ble_server = digitalRead(SYNC_SERVER_CLIENT_SELECT_PIN) == HIGH;
-
-  Serial.printf("Starting %s tasks: ", is_ble_server ? "server" : "client");
-  if (is_ble_server) {
-    xTaskCreate(motor_server_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &motor_task_handle);
-    xTaskCreate(ble_server_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &ble_task_handle);
-  } else {
-    xTaskCreate(motor_client_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &motor_task_handle);
-    xTaskCreate(ble_client_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &ble_task_handle);
-  }
-  Serial.println(motor_task_handle && ble_task_handle ? "SUCCESS" : "FAILURE");
+  GloveApp::start(is_ble_server);
 }
 
 // Low-priority housekeeping
