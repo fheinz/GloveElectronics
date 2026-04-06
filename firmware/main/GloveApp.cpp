@@ -1,6 +1,11 @@
 #include "GloveApp.h"
 #include "GloveHardware.h"
 #include "GloveBluetooth.h"
+#include "GloveEspNow.h"
+
+void IRAM_ATTR GloveApp::sync_isr() {
+  sync_time = millis();
+}
 
 void GloveApp::ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
@@ -9,6 +14,7 @@ void GloveApp::ble_server_task(void* parameter) {
   while (true) {
     vTaskDelayUntil(&last_wake_time, ble_update_frequency);
     ble_server.loop();
+    GloveEspNow::loop();
   }
 }
 
@@ -18,6 +24,7 @@ void GloveApp::ble_client_task(void* parameter) {
   ble_client.init();
   while (true) {
     ble_client.loop();
+    GloveEspNow::loop();
     vTaskDelayUntil(&last_wake_time, ble_update_frequency / 2);
   }
 }
@@ -26,6 +33,9 @@ void GloveApp::motor_server_task(void* parameter) {
   pinMode(SYNC_PIN, INPUT);
   attachInterrupt(SYNC_PIN, GloveApp::sync_isr, RISING);
   int cycle_number = 0;
+
+  // Wait until the first explicit ESP-NOW sync request is received from the Client
+  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
   TickType_t last_wake_time = xTaskGetTickCount();
 
@@ -41,17 +51,29 @@ void GloveApp::motor_client_task(void* parameter) {
   pinMode(SYNC_PIN, OUTPUT);
   digitalWrite(SYNC_PIN, LOW);
 
-  ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
-
-  TickType_t last_wake_time = xTaskGetTickCount();
-  vTaskDelayUntil(&last_wake_time, GloveApp::next_motor_cycle_start - last_wake_time);
   while (true) {
+    // Hang here until the BLE callback announces a state/time change
+    ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+
+    TickType_t last_wake_time = xTaskGetTickCount();
+    TickType_t target = GloveApp::next_motor_cycle_start;
+    
+    // Convert to signed 32-bit math safely to prevent 49-day underflow sleeps
+    // If the sync response came late and we're already past the start time, 
+    // this will skip the sleep and instantly fire to catch up!
+    int32_t delay = (int32_t)(target - last_wake_time);
+    
+    if (delay > 0) {
+      vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(delay));
+    }
+    
     glove.runMotors(true);
-    vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
   }
 }
 
 void GloveApp::start(bool is_server) {
+  GloveEspNow::init(is_server);
+  
   Serial.printf("Starting %s tasks: ", is_server ? "server" : "client");
   if (is_server) {
     xTaskCreate(GloveApp::motor_server_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::motor_task_handle_);

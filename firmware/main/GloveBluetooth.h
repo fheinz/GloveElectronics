@@ -4,17 +4,16 @@
 #include <BLEServer.h>
 #include "config.h"
 #include "GloveHardware.h"
-#include "GloveApp.h"
+#include "GloveEspNow.h"
 
 typedef struct __attribute__((packed)) {
-  TickType_t sender_timestamp;
   TickType_t next_cycle_start;
   int pattern;
 } PatternSyncMessage;
 
-class GloveBLEServer : public BLEServerCallbacks {
+class GloveBLEServer : public BLEServerCallbacks, public BLECharacteristicCallbacks {
  public:
-  GloveBLEServer() : server_(nullptr), service_(nullptr), pattern_sync_characteristic_(nullptr),
+  GloveBLEServer() : server_(nullptr), service_(nullptr), pattern_characteristic_(nullptr), mac_characteristic_(nullptr),
                      advertising_(nullptr), device_connected_(false), last_device_connected_(false) {}
 
   void init() {
@@ -22,8 +21,17 @@ class GloveBLEServer : public BLEServerCallbacks {
     server_ = BLEDevice::createServer();
     server_->setCallbacks(this);
     service_ = server_->createService(SERVICE_UUID);
-    pattern_sync_characteristic_ = service_->createCharacteristic(
+    pattern_characteristic_ = service_->createCharacteristic(
       PATTERN_SYNC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_NOTIFY);
+      
+    mac_characteristic_ = service_->createCharacteristic(
+      ESPNOW_MAC_CHARACTERISTIC_UUID, BLECharacteristic::PROPERTY_READ | BLECharacteristic::PROPERTY_WRITE);
+    mac_characteristic_->setCallbacks(this);
+
+    uint8_t mac[6];
+    WiFi.macAddress(mac);
+    mac_characteristic_->setValue(mac, 6);
+
     setPatternSyncMessage(GloveApp::next_motor_cycle_start, glove.getCurrentPattern());
     service_->start();
 
@@ -44,7 +52,7 @@ class GloveBLEServer : public BLEServerCallbacks {
     }
     if (device_connected_) {
       setPatternSyncMessage(GloveApp::next_motor_cycle_start, glove.getCurrentPattern());
-      pattern_sync_characteristic_->notify();
+      pattern_characteristic_->notify();
     }
     last_device_connected_ = device_connected_;
   }
@@ -60,14 +68,26 @@ class GloveBLEServer : public BLEServerCallbacks {
     Serial.println("Client disconnected");
   }
 
+  void onWrite(BLECharacteristic *pCharacteristic) override {
+    if (pCharacteristic->getUUID().equals(BLEUUID(ESPNOW_MAC_CHARACTERISTIC_UUID))) {
+      String rxValue = pCharacteristic->getValue();
+      if (rxValue.length() == 6) {
+        const uint8_t* mac = (const uint8_t*)rxValue.c_str();
+        GloveEspNow::addPeer(mac);
+        Serial.printf("Received Client MAC Address via BLE: %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+      }
+    }
+  }
+
   void setPatternSyncMessage(TickType_t next_cycle, int pattern) {
-    PatternSyncMessage message = { xTaskGetTickCount(), next_cycle, pattern };
-    pattern_sync_characteristic_->setValue((uint8_t*)&message, sizeof(message));
+    PatternSyncMessage message = { next_cycle, pattern };
+    pattern_characteristic_->setValue((uint8_t*)&message, sizeof(message));
   }
 
   BLEServer* server_;
   BLEService* service_;
-  BLECharacteristic* pattern_sync_characteristic_;
+  BLECharacteristic* pattern_characteristic_;
+  BLECharacteristic* mac_characteristic_;
   BLEAdvertising* advertising_;
   volatile bool device_connected_;
   volatile bool last_device_connected_;
@@ -102,7 +122,6 @@ class GloveBLEClient : public BLEClientCallbacks {
 
   static void notifyCallback(BLERemoteCharacteristic* rc, uint8_t* data, size_t len, bool is_notify) {
     static TickType_t last_cycle_start_received = 0;
-    TickType_t client_ticks = xTaskGetTickCount();
     PatternSyncMessage message;
 
     if (len != sizeof(message)) {
@@ -111,19 +130,15 @@ class GloveBLEClient : public BLEClientCallbacks {
     }
 
     memcpy(&message, data, len);
-    TickType_t server_ticks = message.sender_timestamp;
     TickType_t next_cycle_start = message.next_cycle_start;
     glove.setCurrentPattern(message.pattern);
 
     if (last_cycle_start_received != next_cycle_start) {
-      int32_t tick_drift = (uint32_t)(client_ticks - server_ticks);
-      tick_drift -= 15; 
-
       last_cycle_start_received = next_cycle_start;
-      GloveApp::next_motor_cycle_start = next_cycle_start + tick_drift;
+      GloveApp::next_motor_cycle_start = next_cycle_start + GloveApp::current_tick_drift;
       Serial.printf(
-        "%010u: (%10u, %10u, %d) New pattern starting at %010u(%d)\n",
-        client_ticks, server_ticks, next_cycle_start, glove.getCurrentPattern(), GloveApp::next_motor_cycle_start, tick_drift, glove.getCurrentPattern());
+        "New pattern (%d). Next motor cycle at %u\n",
+        glove.getCurrentPattern(), GloveApp::next_motor_cycle_start);
         
       GloveApp::notifyMotorTask();
     }
@@ -171,6 +186,29 @@ class GloveBLEClient : public BLEClientCallbacks {
         if (!bindCharacteristic(remote_service, PATTERN_SYNC_CHARACTERISTIC_UUID, notifyCallback)) {
           client_->disconnect();
           continue;
+        }
+
+        BLERemoteCharacteristic* rx_mac_char = remote_service->getCharacteristic(ESPNOW_MAC_CHARACTERISTIC_UUID);
+        if (rx_mac_char == nullptr) {
+          Serial.println("ESPNOW MAC Characteristic not found on server");
+          client_->disconnect();
+          continue;
+        }
+
+        if (rx_mac_char->canRead()) {
+          String value = rx_mac_char->readValue();
+          if (value.length() == 6) {
+            const uint8_t* mac = (const uint8_t*)value.c_str();
+            GloveEspNow::addPeer(mac);
+            Serial.printf("Read Server MAC Address: %02X:%02X:%02X:%02X:%02X:%02X\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+          }
+        }
+
+        if (rx_mac_char->canWrite()) {
+          uint8_t mac[6];
+          WiFi.macAddress(mac);
+          rx_mac_char->writeValue(mac, 6);
+          Serial.println("Sent Client MAC Address to Server.");
         }
 
         connected_to_server_ = true;

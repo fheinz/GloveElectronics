@@ -6,10 +6,9 @@ class GloveApp {
  public:
   static inline volatile uint32_t sync_time = 0;
   static inline volatile TickType_t next_motor_cycle_start = 0;
+  static inline volatile int32_t current_tick_drift = 0;
 
-  static void IRAM_ATTR sync_isr() {
-    sync_time = millis();
-  }
+  static void IRAM_ATTR sync_isr();
 
   static void notifyMotorTask() {
     if (motor_task_handle_ != nullptr) {
