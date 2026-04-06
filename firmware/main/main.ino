@@ -1,12 +1,13 @@
-// Select ESP32C3 Dev Module as the board, and enable "USB CDC On Boot" in the "Tools" menu.
+// Select ESP32C3 Dev Module as the board, and enable "USB CDC On Boot" in the
+// "Tools" menu.
 
 #include <algorithm>
 #include <utility>
 
-#include "config.h"
-#include "GloveHardware.h"
 #include "GloveApp.h"
 #include "GloveBluetooth.h"
+#include "GloveHardware.h"
+#include "config.h"
 
 I2CMux i2c_mux;
 Glove glove;
@@ -30,7 +31,8 @@ void setup() {
 // Low-priority housekeeping
 void loop() {
   if (!glove.isBatteryOK()) {
-    Serial.printf("Low battery (%fv). Shutting down\n", glove.getBatteryVoltage());
+    Serial.printf("Low battery (%fv). Shutting down\n",
+                  glove.getBatteryVoltage());
     glove.shutdown();
   }
 
