@@ -10,16 +10,6 @@ constexpr int SDA_PIN = 8;
 constexpr int SCL_PIN = 2;
 constexpr uint16_t I2C_MUX_ADDR = 0x70;
 constexpr uint32_t I2C_CLOCK_FREQUENCY = 400000;
-constexpr uint16_t DRV2605_I2C_ADDR = 0x5A;
-
-constexpr uint8_t DRV2605_REG_MODE = 0x01;
-constexpr uint8_t DRV2605_MODE_PWM = 0x03;
-constexpr uint8_t DRV2605_REG_FEEDBACK = 0x1A;
-constexpr uint8_t DRV2605_REG_CONTROL3 = 0x1D;
-constexpr uint8_t DRV2605_REG_VBATT = 0x21;
-
-constexpr uint8_t DRV2605_LRA_MODE = 0x80;
-constexpr uint8_t DRV2605_LRA_OPEN_LOOP = 0x01;
 
 constexpr uint16_t ACTIVE_DUTY_CYCLE = 250;
 constexpr uint16_t INACTIVE_DUTY_CYCLE = 128;

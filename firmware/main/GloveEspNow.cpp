@@ -3,26 +3,19 @@
 #include "config.h"
 #include <esp_wifi.h>
 
-static uint8_t peer_mac_address[6] = {0};
-static bool peer_added = false;
-static bool is_server_mode = false;
-static esp_now_peer_info_t peerInfo;
-static uint32_t last_sync_time = 0;
-static bool is_wifi_awake = true;
 
-static uint8_t retry_count = 0;
 
-typedef struct __attribute__((packed)) {
+typedef struct __attribute__((packed)) EspNowSyncRequest {
   TickType_t client_tx_ticks;
 } EspNowSyncRequest;
 
-typedef struct __attribute__((packed)) {
+typedef struct __attribute__((packed)) EspNowSyncResponse {
   TickType_t client_tx_ticks;
   TickType_t server_tx_ticks;
 } EspNowSyncResponse;
 
-static void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incomingData, int len) {
-  if (is_server_mode) {
+void GloveEspNow::OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incomingData, int len) {
+  if (getInstance().is_server_mode) {
     if (len != sizeof(EspNowSyncRequest)) return;
     EspNowSyncRequest req;
     memcpy(&req, incomingData, sizeof(req));
@@ -31,9 +24,9 @@ static void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incoming
     resp.client_tx_ticks = req.client_tx_ticks;
     resp.server_tx_ticks = xTaskGetTickCount();
     
-    esp_now_send(peer_mac_address, (uint8_t*)&resp, sizeof(resp));
-    last_sync_time = millis();
-    GloveApp::notifyMotorTask();
+    esp_now_send(getInstance().peer_mac_address, (uint8_t*)&resp, sizeof(resp));
+    getInstance().last_sync_time = millis();
+    GloveApp::getInstance().notifyMotorTask();
   } else {
     if (len != sizeof(EspNowSyncResponse)) return;
     EspNowSyncResponse resp;
@@ -44,7 +37,7 @@ static void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incoming
     TickType_t server_time_at_rx = resp.server_tx_ticks + (rtt / 2);
     
     int32_t tick_drift = (int32_t)(client_rx_ticks - server_time_at_rx);
-    GloveApp::current_tick_drift = tick_drift;
+    GloveApp::getInstance().current_tick_drift = tick_drift;
     
     Serial.printf("ESPNOW Sync received! RTT: %d ms, Drift: %d\n", pdTICKS_TO_MS(rtt), tick_drift);
     
@@ -63,10 +56,10 @@ static void OnDataRecv(const esp_now_recv_info_t * info, const uint8_t *incoming
 
     last_server_ticks = resp.server_tx_ticks;
     last_client_ticks = client_rx_ticks;
-    last_sync_time = millis();
-    retry_count = 0;
+    getInstance().last_sync_time = millis();
+    getInstance().retry_count = 0;
     
-    GloveEspNow::sleep();
+    GloveEspNow::getInstance().sleep();
   }
 }
 

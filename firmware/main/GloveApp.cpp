@@ -4,27 +4,25 @@
 #include "GloveEspNow.h"
 
 void IRAM_ATTR GloveApp::sync_isr() {
-  sync_time = millis();
+  getInstance().sync_time = millis();
 }
 
 void GloveApp::ble_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
-  ble_server.init();
   while (true) {
     vTaskDelayUntil(&last_wake_time, ble_update_frequency);
-    ble_server.loop();
-    GloveEspNow::loop();
+    GloveBLEServer::getInstance().loop();
+    GloveEspNow::getInstance().loop();
   }
 }
 
 void GloveApp::ble_client_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
-  ble_client.init();
   while (true) {
-    ble_client.loop();
-    GloveEspNow::loop();
+    GloveBLEClient::getInstance().loop();
+    GloveEspNow::getInstance().loop();
     vTaskDelayUntil(&last_wake_time, ble_update_frequency / 2);
   }
 }
@@ -40,10 +38,10 @@ void GloveApp::motor_server_task(void* parameter) {
   TickType_t last_wake_time = xTaskGetTickCount();
 
   while (true) {
-    glove.setCurrentPattern((cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(Glove::getNumPatterns()) : -1);
-    GloveApp::next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
+    Glove::getInstance().setCurrentPattern((cycle_number++ % CYCLES_PER_ROUND < ACTIVE_CYCLES_PER_ROUND) ? random(Glove::getNumPatterns()) : -1);
+    GloveApp::getInstance().next_motor_cycle_start = last_wake_time + FULL_CYCLE_LENGTH;
     vTaskDelayUntil(&last_wake_time, FULL_CYCLE_LENGTH);
-    glove.runMotors(false);
+    Glove::getInstance().runMotors(false);
   }
 }
 
@@ -56,7 +54,7 @@ void GloveApp::motor_client_task(void* parameter) {
     ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
 
     TickType_t last_wake_time = xTaskGetTickCount();
-    TickType_t target = GloveApp::next_motor_cycle_start;
+    TickType_t target = GloveApp::getInstance().next_motor_cycle_start;
     
     // Convert to signed 32-bit math safely to prevent 49-day underflow sleeps
     // If the sync response came late and we're already past the start time, 
@@ -67,20 +65,20 @@ void GloveApp::motor_client_task(void* parameter) {
       vTaskDelayUntil(&last_wake_time, pdMS_TO_TICKS(delay));
     }
     
-    glove.runMotors(true);
+    Glove::getInstance().runMotors(true);
   }
 }
 
 void GloveApp::start(bool is_server) {
-  GloveEspNow::init(is_server);
+  GloveEspNow::getInstance().init(is_server);
   
   Serial.printf("Starting %s tasks: ", is_server ? "server" : "client");
   if (is_server) {
-    xTaskCreate(GloveApp::motor_server_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::motor_task_handle_);
-    xTaskCreate(GloveApp::ble_server_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::ble_task_handle_);
+    xTaskCreate(GloveApp::motor_server_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::getInstance().motor_task_handle_);
+    xTaskCreate(GloveApp::ble_server_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::getInstance().ble_task_handle_);
   } else {
-    xTaskCreate(GloveApp::motor_client_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::motor_task_handle_);
-    xTaskCreate(GloveApp::ble_client_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::ble_task_handle_);
+    xTaskCreate(GloveApp::motor_client_task, "Motor task", TASK_STACK_SIZE, NULL, 10, &GloveApp::getInstance().motor_task_handle_);
+    xTaskCreate(GloveApp::ble_client_task, "BLE task", TASK_STACK_SIZE, NULL, 10, &GloveApp::getInstance().ble_task_handle_);
   }
-  Serial.println(GloveApp::motor_task_handle_ && GloveApp::ble_task_handle_ ? "SUCCESS" : "FAILURE");
+  Serial.println(GloveApp::getInstance().motor_task_handle_ && GloveApp::getInstance().ble_task_handle_ ? "SUCCESS" : "FAILURE");
 }
